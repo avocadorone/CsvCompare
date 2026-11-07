@@ -1,11 +1,7 @@
 using CsvCompare.Models;
 using CsvCompare.Services;
 using CsvCompare.Utilities;
-using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using CsvCompare.Services;
 
 namespace CsvCompare.Forms;
 
@@ -396,7 +392,8 @@ public sealed class MainForm : Form
 
     #region 比較結果をExcel用にコピーする。
     /// <summary>
-    /// 現在の比較結果をExcelに貼り付けられる形式でコピーする。
+    /// 比較結果をHTML形式とテキスト形式でクリップボードにコピーする。
+    /// Excelでは書式付きで貼り付けられる。
     /// </summary>
     private void CopyResultsToClipboard()
     {
@@ -408,29 +405,46 @@ public sealed class MainForm : Form
                 "確認",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
+
             return;
         }
 
-        // 左右のCSVに含まれる最大列数を取得
-        int maxColumns = Math.Max(
-            _left.Rows.Concat(_right.Rows)
-                .Select(row => row.Length)
-                .DefaultIfEmpty(0)
-                .Max(),
-            1);
-
-        // Excel用のタブ区切り文字列を生成
-        string tsv = ClipboardHelper.CreateComparisonTsv(
-            _comparisons,
-            maxColumns,
-            _diffOnly.Checked);
-
         try
         {
-            // Unicode形式でクリップボードに設定
-            Clipboard.SetText(tsv, TextDataFormat.UnicodeText);
+            // 左右のCSVに含まれる最大列数を取得
+            int maxColumns = Math.Max(
+                _left.Rows.Concat(_right.Rows)
+                    .Select(row => row.Length)
+                    .DefaultIfEmpty(0)
+                    .Max(),
+                1);
 
-            _status.Text = "比較結果をクリップボードにコピーしました。Excelで貼り付けできます。";
+            // HTML形式のデータを生成（書式情報を保持）
+            string html = ClipboardHelper.CreateComparisonHtml(
+                _comparisons,
+                maxColumns,
+                _diffOnly.Checked);
+
+            // テキスト形式のデータも生成（互換性確保）
+            string tsv = ClipboardHelper.CreateComparisonTsv(
+                _comparisons,
+                maxColumns,
+                _diffOnly.Checked);
+
+            // 複数形式のデータをクリップボードに登録
+            var data = new DataObject();
+
+            // Excel向け：HTML形式
+            data.SetData(DataFormats.Html, false, html);
+
+            // ほかのアプリ向け：Unicodeテキスト形式
+            data.SetData(DataFormats.UnicodeText, true, tsv);
+
+            // クリップボードに設定
+            Clipboard.SetDataObject(data, true);
+
+            _status.Text =
+                "書式付き比較結果をコピーしました。Excelに貼り付けできます。";
         }
         catch (Exception ex)
         {
