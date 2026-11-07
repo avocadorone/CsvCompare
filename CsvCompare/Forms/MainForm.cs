@@ -1,5 +1,10 @@
-using System.Drawing;
 using CsvCompare.Models;
+using CsvCompare.Services;
+using CsvCompare.Utilities;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using CsvCompare.Services;
 
 namespace CsvCompare.Forms;
@@ -10,6 +15,7 @@ namespace CsvCompare.Forms;
 /// </summary>
 public sealed class MainForm : Form
 {
+    #region クラス変数
     // 比較元CSVのファイルパスを表示するテキストボックス
     private readonly TextBox _leftPath = new() { ReadOnly = true, Dock = DockStyle.Fill };
 
@@ -36,6 +42,14 @@ public sealed class MainForm : Form
 
     // CSVの行単位で比較した結果を保持する
     private IReadOnlyList<RowComparison> _comparisons = Array.Empty<RowComparison>();
+
+    // 手動で対応付けた行を保持する。
+    // Key：比較元の行インデックス（0始まり）
+    // Value：比較先の行インデックス（0始まり）
+    private readonly Dictionary<int, int> _manualPairs = new();
+    #endregion
+
+    #region public
 
     #region フォームの初期化処理。
     /// <summary>
@@ -71,7 +85,7 @@ public sealed class MainForm : Form
             AutoSize = true,
             Padding = new Padding(8),
             ColumnCount = 4,
-            RowCount = 2
+            RowCount = 3
         };
 
         // 各列の幅を設定
@@ -93,6 +107,51 @@ public sealed class MainForm : Form
         // 比較ボタンと差分表示チェックボックスを配置
         top.Controls.Add(compare, 3, 0);
         top.Controls.Add(_diffOnly, 3, 1);
+
+        // 行操作・コピー用のボタンを配置するパネル
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+
+        // 3行目にボタン群を配置
+        top.Controls.Add(actions, 0, 2);
+
+        // 4列分の幅を使用する
+        top.SetColumnSpan(actions, 4);
+
+        var pairRows = new Button
+        {
+            Text = "選択行を対応付け",
+            AutoSize = true
+        };
+
+        var unpairRows = new Button
+        {
+            Text = "対応付け解除",
+            AutoSize = true
+        };
+
+        var copyResults = new Button
+        {
+            Text = "Excel用にコピー",
+            AutoSize = true
+        };
+
+        pairRows.Click += (_, _) => PairSelectedRows();
+        unpairRows.Click += (_, _) => UnpairSelectedRows();
+        copyResults.Click += (_, _) => CopyResultsToClipboard();
+        // セル内の文字単位の差分を描画する
+        _leftGrid.CellPainting += Grid_CellPainting;
+        _rightGrid.CellPainting += Grid_CellPainting;
+
+        actions.Controls.Add(pairRows);
+        actions.Controls.Add(unpairRows);
+        actions.Controls.Add(copyResults);
+
 
         // 左右のCSV表示領域を分割するコンテナを作成
         var split = new SplitContainer
@@ -126,6 +185,10 @@ public sealed class MainForm : Form
     }
     #endregion
 
+    #endregion
+
+    #region private
+
     #region CSV表示用のDataGridViewを生成する。
     /// <summary>
     /// CSV表示用のDataGridViewを生成する。
@@ -150,7 +213,8 @@ public sealed class MainForm : Form
         BackgroundColor = Color.White,
 
         // セル単位で選択できるように設定
-        SelectionMode = DataGridViewSelectionMode.CellSelect,
+        //SelectionMode = DataGridViewSelectionMode.CellSelect,
+        SelectionMode = DataGridViewSelectionMode.FullRowSelect,
         MultiSelect = false,
 
         // コピー時にヘッダーも含める
@@ -208,17 +272,174 @@ public sealed class MainForm : Form
             _left = reader.Read(_leftPath.Text);
             _right = reader.Read(_rightPath.Text);
 
-            // 2つのCSVの行データを比較し、比較結果を取得
-            _comparisons = new CsvComparator().Compare(_left.Rows, _right.Rows);
+            // *** BFR-START 2026/11/07
+            //// 2つのCSVの行データを比較し、比較結果を取得
+            //_comparisons = new CsvComparator().Compare(_left.Rows, _right.Rows);
+            //
+            //// 比較結果を画面に表示
+            //RenderResults();
+            // *** BFR-END   2026/11/07
+            // *** AFT-START 2026/11/07
+            // 新しく比較するときは、以前の手動対応付けを解除する
+            _manualPairs.Clear();
 
-            // 比較結果を画面に表示
-            RenderResults();
+            // 比較処理を実行
+            UpdateComparison();
+            // *** AFT-END   2026/11/07fCompareFiles
         }
         catch (Exception ex)
         {
             // 読み込みや比較処理でエラーが発生した場合はメッセージを表示
             MessageBox.Show(this, ex.Message, "CSV読み込みエラー",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+    #endregion
+
+    #region 手動対応付けを反映して再比較する。
+    /// <summary>
+    /// 現在の手動対応付けを反映して比較処理を実行する。
+    /// </summary>
+    private void UpdateComparison()
+    {
+        if (_left is null || _right is null)
+            return;
+
+        // 手動対応付け情報を渡して比較
+        _comparisons = new CsvComparator().Compare(
+            _left.Rows,
+            _right.Rows,
+            _manualPairs);
+
+        // 比較結果を画面に反映
+        RenderResults();
+    }
+    #endregion
+
+    #region 選択した左右の行を対応付ける。
+    /// <summary>
+    /// 左右のグリッドで選択されている行を対応付ける。
+    /// </summary>
+    private void PairSelectedRows()
+    {
+        if (_leftGrid.CurrentRow?.Tag is not RowComparison leftItem ||
+            !leftItem.LeftRowIndex.HasValue)
+        {
+            MessageBox.Show(this, "比較元の行を選択してください。");
+            return;
+        }
+
+        if (_rightGrid.CurrentRow?.Tag is not RowComparison rightItem ||
+            !rightItem.RightRowIndex.HasValue)
+        {
+            MessageBox.Show(this, "比較先の行を選択してください。");
+            return;
+        }
+
+        int leftIndex = leftItem.LeftRowIndex.Value;
+        int rightIndex = rightItem.RightRowIndex.Value;
+
+        // 既存の対応付けを解除
+        _manualPairs.Remove(leftIndex);
+
+        var existingKeys = _manualPairs
+            .Where(x => x.Value == rightIndex)
+            .Select(x => x.Key)
+            .ToList();
+
+        foreach (int key in existingKeys)
+            _manualPairs.Remove(key);
+
+        // 新しい対応付けを登録
+        _manualPairs[leftIndex] = rightIndex;
+
+        UpdateComparison();
+    }
+    #endregion
+
+    #region 選択した行の対応付けを解除する。
+    /// <summary>
+    /// 選択した左右の行に設定されている手動対応付けを解除する。
+    /// </summary>
+    private void UnpairSelectedRows()
+    {
+        RowComparison? leftItem =
+            _leftGrid.CurrentRow?.Tag as RowComparison;
+
+        RowComparison? rightItem =
+            _rightGrid.CurrentRow?.Tag as RowComparison;
+
+        int? leftIndex = leftItem?.LeftRowIndex;
+        int? rightIndex = rightItem?.RightRowIndex;
+
+        var removeKeys = _manualPairs
+            .Where(x =>
+                (leftIndex.HasValue && x.Key == leftIndex.Value) ||
+                (rightIndex.HasValue && x.Value == rightIndex.Value))
+            .Select(x => x.Key)
+            .ToList();
+
+        if (removeKeys.Count == 0)
+        {
+            MessageBox.Show(
+                this,
+                "選択した行には手動対応付けがありません。");
+            return;
+        }
+
+        foreach (int key in removeKeys)
+            _manualPairs.Remove(key);
+
+        UpdateComparison();
+    }
+    #endregion
+
+    #region 比較結果をExcel用にコピーする。
+    /// <summary>
+    /// 現在の比較結果をExcelに貼り付けられる形式でコピーする。
+    /// </summary>
+    private void CopyResultsToClipboard()
+    {
+        if (_left is null || _right is null || _comparisons.Count == 0)
+        {
+            MessageBox.Show(
+                this,
+                "先にCSVを比較してください。",
+                "確認",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        // 左右のCSVに含まれる最大列数を取得
+        int maxColumns = Math.Max(
+            _left.Rows.Concat(_right.Rows)
+                .Select(row => row.Length)
+                .DefaultIfEmpty(0)
+                .Max(),
+            1);
+
+        // Excel用のタブ区切り文字列を生成
+        string tsv = ClipboardHelper.CreateComparisonTsv(
+            _comparisons,
+            maxColumns,
+            _diffOnly.Checked);
+
+        try
+        {
+            // Unicode形式でクリップボードに設定
+            Clipboard.SetText(tsv, TextDataFormat.UnicodeText);
+
+            _status.Text = "比較結果をクリップボードにコピーしました。Excelで貼り付けできます。";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"クリップボードへのコピーに失敗しました。\n{ex.Message}",
+                "コピーエラー",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
     }
     #endregion
@@ -287,9 +508,32 @@ public sealed class MainForm : Form
             int li = _leftGrid.Rows.Add(MakeCells(item.Left, maxColumns));
             int ri = _rightGrid.Rows.Add(MakeCells(item.Right, maxColumns));
 
-            // 行ヘッダーに比較対象の行番号を設定
-            _leftGrid.Rows[li].HeaderCell.Value = item.RowNumber.ToString();
-            _rightGrid.Rows[ri].HeaderCell.Value = item.RowNumber.ToString();
+            //// 行ヘッダーに比較対象の行番号を設定
+            //_leftGrid.Rows[li].HeaderCell.Value = item.RowNumber.ToString();
+            //_rightGrid.Rows[ri].HeaderCell.Value = item.RowNumber.ToString();
+
+            // *** BFR-START 2026/11/07
+            //// 左右のグリッド行に、元CSVの行インデックスを保持する
+            //// この情報を使って、選択行の対応付けを行う
+            //_leftGrid.Rows[li].Tag = item.LeftRowIndex;
+            //_rightGrid.Rows[ri].Tag = item.RightRowIndex;
+            // *** BFR-END   2026/11/07
+            // *** AFT-START 2026/11/07
+            // 描画時に比較結果を参照できるように保持
+            _leftGrid.Rows[li].Tag = item;
+            _rightGrid.Rows[ri].Tag = item;
+            // *** AFT-END   2026/11/07
+
+            // 左右それぞれの元CSVの行番号をヘッダーに表示
+            _leftGrid.Rows[li].HeaderCell.Value =
+                item.LeftRowIndex.HasValue
+                    ? (item.LeftRowIndex.Value + 1).ToString()
+                    : string.Empty;
+
+            _rightGrid.Rows[ri].HeaderCell.Value =
+                item.RightRowIndex.HasValue
+                    ? (item.RightRowIndex.Value + 1).ToString()
+                    : string.Empty;
 
             // 追加された行は比較先側を緑色で表示
             if (item.Difference == DifferenceType.Added)
@@ -346,5 +590,174 @@ public sealed class MainForm : Form
 
         return values;
     }
+    #endregion
+
+    #region セル内の文字単位の差分を描画する。
+    /// <summary>
+    /// DataGridViewのセルを描画する。
+    /// 変更されたセルについて、文字単位で差分を着色する。
+    /// </summary>
+    private void Grid_CellPainting(
+        object? sender,
+        DataGridViewCellPaintingEventArgs e)
+    {
+        // ヘッダー行・列は通常描画に任せる
+        if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            return;
+
+        if (sender is not DataGridView grid)
+            return;
+
+        // 行に保持している比較結果を取得
+        if (grid.Rows[e.RowIndex].Tag is not RowComparison item)
+            return;
+
+        // 変更されたセル以外は通常描画に任せる
+        if (item.Difference != DifferenceType.Changed ||
+            !item.ChangedColumns.Contains(e.ColumnIndex))
+        {
+            return;
+        }
+
+        // 比較元・比較先の値を取得
+        string leftText = e.ColumnIndex < (item.Left?.Length ?? 0)
+            ? item.Left![e.ColumnIndex]
+            : string.Empty;
+
+        string rightText = e.ColumnIndex < (item.Right?.Length ?? 0)
+            ? item.Right![e.ColumnIndex]
+            : string.Empty;
+
+        // 文字単位の差分を抽出
+        var diff = CellDiff.Compare(leftText, rightText);
+
+        // 左右どちらのグリッドかによって描画内容を切り替える
+        IReadOnlyList<TextSegment> segments =
+            ReferenceEquals(grid, _leftGrid)
+                ? diff.Left
+                : diff.Right;
+
+        // セルの背景を描画
+        e.PaintBackground(e.ClipBounds, true);
+
+        // セルの余白を考慮した描画領域
+        Rectangle bounds = e.CellBounds;
+
+        int leftPadding = e.CellStyle.Padding.Left + 3;
+        int rightPadding = e.CellStyle.Padding.Right + 3;
+
+        int x = bounds.Left + leftPadding;
+        int y = bounds.Top;
+
+        int availableWidth = Math.Max(
+            0,
+            bounds.Width - leftPadding - rightPadding);
+
+        // セル内で描画する範囲を制限
+        Rectangle textBounds = new(
+            x,
+            bounds.Top,
+            availableWidth,
+            bounds.Height);
+
+        GraphicsState state = e.Graphics.Save();
+
+        try
+        {
+            e.Graphics.SetClip(textBounds);
+
+            // 縦方向の文字位置を中央に合わせる
+            Size sampleSize = TextRenderer.MeasureText(
+                "あ",
+                e.CellStyle.Font,
+                Size.Empty,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+
+            int textY = y + (bounds.Height - sampleSize.Height) / 2;
+
+            // 水平方向の配置を考慮
+            int totalWidth = segments.Sum(segment =>
+                TextRenderer.MeasureText(
+                    segment.Text,
+                    segment.IsDifferent
+                        ? new Font(e.CellStyle.Font, FontStyle.Bold)
+                        : e.CellStyle.Font,
+                    Size.Empty,
+                    TextFormatFlags.NoPadding |
+                    TextFormatFlags.SingleLine).Width);
+
+            switch (e.CellStyle.Alignment)
+            {
+                case DataGridViewContentAlignment.MiddleRight:
+                case DataGridViewContentAlignment.TopRight:
+                case DataGridViewContentAlignment.BottomRight:
+                    x = bounds.Right - rightPadding - totalWidth;
+                    break;
+
+                case DataGridViewContentAlignment.MiddleCenter:
+                case DataGridViewContentAlignment.TopCenter:
+                case DataGridViewContentAlignment.BottomCenter:
+                    x = bounds.Left + (bounds.Width - totalWidth) / 2;
+                    break;
+            }
+
+            // 区間ごとに文字を描画
+            foreach (var segment in segments)
+            {
+                bool isDifferent = segment.IsDifferent;
+
+                // 差分文字列は太字にする
+                Font font = isDifferent
+                    ? new Font(e.CellStyle.Font, FontStyle.Bold)
+                    : e.CellStyle.Font;
+
+                try
+                {
+                    // 削除文字は赤、追加文字は緑
+                    Color color = isDifferent
+                        ? (ReferenceEquals(grid, _leftGrid)
+                            ? Color.Firebrick
+                            : Color.ForestGreen)
+                        : e.CellStyle.ForeColor;
+
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        segment.Text,
+                        font,
+                        new Point(x, textY),
+                        color,
+                        TextFormatFlags.NoPadding |
+                        TextFormatFlags.SingleLine |
+                        TextFormatFlags.NoPrefix);
+
+                    // 次の文字列の描画位置を進める
+                    x += TextRenderer.MeasureText(
+                        segment.Text,
+                        font,
+                        Size.Empty,
+                        TextFormatFlags.NoPadding |
+                        TextFormatFlags.SingleLine).Width;
+                }
+                finally
+                {
+                    // 差分用に生成したフォントだけ破棄
+                    if (isDifferent)
+                        font.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            e.Graphics.Restore(state);
+        }
+
+        // セルの枠線を描画
+        e.Paint(e.ClipBounds, DataGridViewPaintParts.Border);
+
+        // 標準描画を終了し、独自描画を採用
+        e.Handled = true;
+    }
+    #endregion
+
     #endregion
 }

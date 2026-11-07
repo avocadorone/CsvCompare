@@ -3,119 +3,188 @@ using CsvCompare.Models;
 namespace CsvCompare.Services;
 
 /// <summary>
-/// 行番号（位置）を基準に左右のCSVを比較するサービス。
-/// キー列による並べ替え・照合は行わず、同じ位置にある行同士を比較する。
+/// 左右のCSVを比較するサービス。
+/// 手動で対応付けされた行を優先し、残りは同じ行番号同士で比較する。
 /// </summary>
 public sealed class CsvComparator
 {
-    #region 比較元と比較先のCSVデータを比較する。
+    #region CSV比較処理
+
     /// <summary>
-    /// 比較元と比較先のCSVデータを比較する。
-    /// 行の追加・削除・変更・一致を判定し、比較結果を返す。
+    /// 左右のCSVを比較する。
+    /// 手動対応付けが指定されている場合は、その対応を優先する。
     /// </summary>
     /// <param name="left">比較元CSVの行データ</param>
     /// <param name="right">比較先CSVの行データ</param>
-    /// <returns>行ごとの比較結果一覧</returns>
+    /// <param name="manualPairs">
+    /// 手動対応付け情報。
+    /// Keyは左行インデックス、Valueは右行インデックス（どちらも0始まり）。
+    /// </param>
+    /// <returns>行ごとの比較結果</returns>
     public IReadOnlyList<RowComparison> Compare(
         IReadOnlyList<string[]> left,
-        IReadOnlyList<string[]> right)
+        IReadOnlyList<string[]> right,
+        IReadOnlyDictionary<int, int>? manualPairs = null)
     {
-        // 左右のCSVのうち、行数が多い方を比較対象の行数とする
-        int count = Math.Max(left.Count, right.Count);
+        // 対応付け済みの行インデックスを管理する
+        var usedLeft = new HashSet<int>();
+        var usedRight = new HashSet<int>();
 
-        // 比較結果を格納するリストを作成
-        // あらかじめ最大行数分の容量を確保しておく
-        var results = new List<RowComparison>(count);
+        // 左右の行の対応関係を保持する
+        var alignments = new List<(int? Left, int? Right)>();
 
-        // 先頭行から末尾行まで、同じ行番号同士を比較する
-        for (int i = 0; i < count; i++)
+        // 手動対応付けを優先して登録する
+        if (manualPairs is not null)
         {
-            // 比較元の対象行を取得
-            // 指定した行番号が存在しない場合はnull
-            string[]? l = i < left.Count ? left[i] : null;
+            foreach (var pair in manualPairs)
+            {
+                int leftIndex = pair.Key;
+                int rightIndex = pair.Value;
 
-            // 比較先の対象行を取得
-            // 指定した行番号が存在しない場合はnull
-            string[]? r = i < right.Count ? right[i] : null;
+                // 行インデックスが範囲内か確認
+                if (leftIndex < 0 || leftIndex >= left.Count)
+                    throw new ArgumentOutOfRangeException(nameof(manualPairs),
+                        $"左側の行インデックスが不正です: {leftIndex}");
 
-            // 比較元に行が存在しない場合は、比較先に追加された行と判定
-            if (l is null)
+                if (rightIndex < 0 || rightIndex >= right.Count)
+                    throw new ArgumentOutOfRangeException(nameof(manualPairs),
+                        $"右側の行インデックスが不正です: {rightIndex}");
+
+                // 同じ行を複数回対応付けない
+                if (!usedLeft.Add(leftIndex))
+                    throw new ArgumentException("左側の行が重複して対応付けられています。");
+
+                if (!usedRight.Add(rightIndex))
+                    throw new ArgumentException("右側の行が重複して対応付けられています。");
+
+                alignments.Add((leftIndex, rightIndex));
+            }
+        }
+
+        // 手動対応付けされていない行は、同じ行番号同士で比較する
+        int maxCount = Math.Max(left.Count, right.Count);
+
+        for (int i = 0; i < maxCount; i++)
+        {
+            bool hasLeft = i < left.Count && !usedLeft.Contains(i);
+            bool hasRight = i < right.Count && !usedRight.Contains(i);
+
+            if (hasLeft && hasRight)
+            {
+                // 左右とも未対応なら、同じ行番号同士を対応付ける
+                alignments.Add((i, i));
+                usedLeft.Add(i);
+                usedRight.Add(i);
+            }
+            else if (hasLeft)
+            {
+                // 左側だけ残っている場合は削除行
+                alignments.Add((i, null));
+                usedLeft.Add(i);
+            }
+            else if (hasRight)
+            {
+                // 右側だけ残っている場合は追加行
+                alignments.Add((null, i));
+                usedRight.Add(i);
+            }
+        }
+
+        // 元の行位置を基準に表示順を整える
+        var orderedAlignments = alignments
+            .OrderBy(x => Math.Min(
+                x.Left ?? int.MaxValue,
+                x.Right ?? int.MaxValue))
+            .ThenBy(x => x.Left ?? int.MaxValue)
+            .ThenBy(x => x.Right ?? int.MaxValue)
+            .ToList();
+
+        // 比較結果を作成
+        var results = new List<RowComparison>(orderedAlignments.Count);
+
+        foreach (var alignment in orderedAlignments)
+        {
+            int? leftIndex = alignment.Left;
+            int? rightIndex = alignment.Right;
+
+            string[]? leftRow =
+                leftIndex.HasValue ? left[leftIndex.Value] : null;
+
+            string[]? rightRow =
+                rightIndex.HasValue ? right[rightIndex.Value] : null;
+
+            // 追加行
+            if (leftRow is null)
             {
                 results.Add(new RowComparison
                 {
-                    RowNumber = i + 1,
+                    RowNumber = results.Count + 1,
+                    LeftRowIndex = null,
+                    RightRowIndex = rightIndex,
                     Left = null,
-                    Right = r,
+                    Right = rightRow,
                     Difference = DifferenceType.Added
                 });
 
-                // 追加行の判定が完了したため、次の行へ進む
                 continue;
             }
 
-            // 比較先に行が存在しない場合は、比較元から削除された行と判定
-            if (r is null)
+            // 削除行
+            if (rightRow is null)
             {
                 results.Add(new RowComparison
                 {
-                    RowNumber = i + 1,
-                    Left = l,
+                    RowNumber = results.Count + 1,
+                    LeftRowIndex = leftIndex,
+                    RightRowIndex = null,
+                    Left = leftRow,
                     Right = null,
                     Difference = DifferenceType.Deleted
                 });
 
-                // 削除行の判定が完了したため、次の行へ進む
                 continue;
             }
 
-            // 左右の行のうち、列数が多い方を比較対象の列数とする
-            int columns = Math.Max(l.Length, r.Length);
+            // 左右の列数の最大値を取得
+            int columns = Math.Max(leftRow.Length, rightRow.Length);
 
-            // 変更された列番号を格納する集合を作成
-            var changed = new HashSet<int>();
+            // 変更された列番号を保持
+            var changedColumns = new HashSet<int>();
 
-            // 左右の列を1列ずつ比較する
             for (int c = 0; c < columns; c++)
             {
-                // 比較元の列データを取得
-                // 列が存在しない場合は空文字として扱う
-                string lv = c < l.Length ? l[c] : string.Empty;
+                string leftValue =
+                    c < leftRow.Length ? leftRow[c] : string.Empty;
 
-                // 比較先の列データを取得
-                // 列が存在しない場合は空文字として扱う
-                string rv = c < r.Length ? r[c] : string.Empty;
+                string rightValue =
+                    c < rightRow.Length ? rightRow[c] : string.Empty;
 
-                // 左右の値を完全一致で比較する
-                // 大文字・小文字や空白の違いも差分として扱う
-                if (!String.Equals(lv, rv, StringComparison.Ordinal))
+                if (!String.Equals(
+                    leftValue,
+                    rightValue,
+                    StringComparison.Ordinal))
                 {
-                    // 値が異なる場合は、変更された列番号を記録
-                    changed.Add(c);
+                    changedColumns.Add(c);
                 }
             }
 
-            // 1行分の比較結果を作成してリストに追加
+            // 比較結果を追加
             results.Add(new RowComparison
             {
-                // 行番号は0始まりのインデックスに1を加えて設定
-                RowNumber = i + 1,
-
-                // 比較元・比較先の行データを保持
-                Left = l,
-                Right = r,
-
-                // 変更された列がなければ一致、1つ以上あれば変更と判定
-                Difference = changed.Count == 0
+                RowNumber = results.Count + 1,
+                LeftRowIndex = leftIndex,
+                RightRowIndex = rightIndex,
+                Left = leftRow,
+                Right = rightRow,
+                Difference = changedColumns.Count == 0
                     ? DifferenceType.Same
                     : DifferenceType.Changed,
-
-                // 変更された列番号の集合を設定
-                ChangedColumns = changed
+                ChangedColumns = changedColumns
             });
         }
 
-        // 全行の比較結果を返す
         return results;
     }
+
     #endregion
 }
